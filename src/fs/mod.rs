@@ -4,6 +4,8 @@
 
 #![allow(dead_code)]
 
+use std::path::PathBuf;
+
 pub mod btrfs_fs;
 pub mod disk;
 pub mod linux_fs;
@@ -237,6 +239,91 @@ impl MountedFs {
             MountedFs::Windows(fs) => fs.parent(path),
             MountedFs::Linux(fs) => fs.parent(path),
             MountedFs::Btrfs(fs) => fs.parent(path),
+        }
+    }
+
+    // ── Write operations ──────────────────────────────────────────────
+
+    /// Whether this filesystem supports write operations
+    pub fn is_writable(&self) -> bool {
+        matches!(self, MountedFs::Windows(_))
+    }
+
+    /// Write data to a file (Windows only)
+    pub fn write_file(&self, path: &str, data: &[u8]) -> FsResult<()> {
+        match self {
+            MountedFs::Windows(fs) => fs.write_file(path, data),
+            _ => Err(FsError::PermissionDenied(
+                "Filesystem is read-only".to_string(),
+            )),
+        }
+    }
+
+    /// Delete a file or directory (Windows only)
+    pub fn delete(&self, path: &str) -> FsResult<()> {
+        match self {
+            MountedFs::Windows(fs) => fs.delete(path),
+            _ => Err(FsError::PermissionDenied(
+                "Filesystem is read-only".to_string(),
+            )),
+        }
+    }
+
+    /// Rename a file or directory (Windows only)
+    pub fn rename(&self, old_path: &str, new_path: &str) -> FsResult<()> {
+        match self {
+            MountedFs::Windows(fs) => fs.rename(old_path, new_path),
+            _ => Err(FsError::PermissionDenied(
+                "Filesystem is read-only".to_string(),
+            )),
+        }
+    }
+
+    /// Create a directory (Windows only)
+    pub fn create_dir(&self, path: &str) -> FsResult<()> {
+        match self {
+            MountedFs::Windows(fs) => fs.create_dir(path),
+            _ => Err(FsError::PermissionDenied(
+                "Filesystem is read-only".to_string(),
+            )),
+        }
+    }
+
+    /// Copy a single file (Windows only)
+    pub fn copy_file(&self, src: &str, dst: &str) -> FsResult<()> {
+        match self {
+            MountedFs::Windows(fs) => fs.copy_file(src, dst),
+            _ => Err(FsError::PermissionDenied(
+                "Filesystem is read-only".to_string(),
+            )),
+        }
+    }
+
+    /// Recursively copy a directory (Windows only)
+    pub fn copy_dir(&self, src: &str, dst: &str) -> FsResult<()> {
+        match self {
+            MountedFs::Windows(fs) => fs.copy_dir(src, dst),
+            _ => Err(FsError::PermissionDenied(
+                "Filesystem is read-only".to_string(),
+            )),
+        }
+    }
+
+    /// Move a file or directory, works across drives (Windows only)
+    pub fn move_path(&self, src: &str, dst: &str) -> FsResult<()> {
+        match self {
+            MountedFs::Windows(fs) => fs.move_path(src, dst),
+            _ => Err(FsError::PermissionDenied(
+                "Filesystem is read-only".to_string(),
+            )),
+        }
+    }
+
+    /// Determine a unique destination path to avoid overwrites
+    pub fn unique_destination(&self, dir: &str, name: &str) -> PathBuf {
+        match self {
+            MountedFs::Windows(_) => windows_fs::WindowsFs::unique_destination(dir, name),
+            _ => PathBuf::from(dir).join(name),
         }
     }
 }

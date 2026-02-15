@@ -3,8 +3,11 @@
 //! This module contains the main application struct that manages filesystems
 //! and renders the main UI.
 
+use std::sync::Arc;
+
 use eframe::egui;
 use egui::{CentralPanel, Context, RichText, SidePanel, TopBottomPanel};
+use std::path::Path;
 
 use crate::fs::btrfs_fs::{BtrfsFs, BTRFS_SUPERBLOCK_OFFSET};
 use crate::fs::disk::{
@@ -14,12 +17,12 @@ use crate::fs::disk::{
 use crate::fs::linux_fs::{LinuxFs, PartitionReader};
 use crate::fs::luks::{is_luks, LuksReader};
 use crate::fs::windows_fs::WindowsFs;
-use crate::fs::{DetectedFsType, MountedFs, PartitionInfo};
+use crate::fs::{DetectedFsType, FsEntry, MountedFs, PartitionInfo};
 
 use super::file_browser::{FileBrowser, FileBrowserAction};
 
-/// The main file viewer application
-pub struct FileViewerApp {
+/// The main file explorer application
+pub struct FileExplorerApp {
     /// Available filesystems
     filesystems: Vec<FilesystemEntry>,
     /// Currently selected filesystem index
@@ -40,6 +43,26 @@ pub struct FileViewerApp {
     show_all_partitions: bool,
     /// LUKS password dialog state
     luks_dialog: Option<LuksDialogState>,
+    /// Clipboard for copy/cut/paste operations
+    clipboard: Option<Clipboard>,
+}
+
+/// Clipboard operation kind
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClipboardOp {
+    Copy,
+    Cut,
+}
+
+/// Clipboard contents — entries and their source filesystem
+#[derive(Debug, Clone)]
+struct Clipboard {
+    /// The operation (copy or cut)
+    op: ClipboardOp,
+    /// Index of the source filesystem these entries came from
+    source_fs: usize,
+    /// The entries on the clipboard
+    entries: Vec<FsEntry>,
 }
 
 /// An entry in the filesystem list
@@ -87,9 +110,47 @@ struct LuksDialogState {
     error: Option<String>,
 }
 
-impl FileViewerApp {
+impl FileExplorerApp {
     /// Create a new application instance
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // Load Windows system fonts: Segoe UI for text, Segoe UI Symbol for
+        // icons/symbols.  We replace egui's default font list entirely so that
+        // the built-in NotoEmoji (B&W emoji) never appears.
+        let mut fonts = egui::FontDefinitions::default();
+
+        // Remove the bundled emoji font so we never fall back to it
+        fonts.font_data.remove("emoji-icon-font");
+
+        if let Ok(data) = std::fs::read("C:\\Windows\\Fonts\\segoeui.ttf") {
+            fonts.font_data.insert(
+                "segoe_ui".into(),
+                Arc::new(egui::FontData::from_owned(data)),
+            );
+        }
+        if let Ok(data) = std::fs::read("C:\\Windows\\Fonts\\seguisym.ttf") {
+            fonts.font_data.insert(
+                "segoe_symbol".into(),
+                Arc::new(egui::FontData::from_owned(data)),
+            );
+        }
+
+        // Proportional: Segoe UI first, then Segoe UI Symbol for glyphs
+        // Segoe UI doesn't cover, then whatever egui defaults remain.
+        if let Some(list) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+            list.retain(|name| name != "emoji-icon-font");
+            list.insert(0, "segoe_symbol".into());
+            list.insert(0, "segoe_ui".into());
+        }
+        // Monospace: keep egui's default mono font first, add Segoe UI as
+        // fallback so symbols still render.
+        if let Some(list) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+            list.retain(|name| name != "emoji-icon-font");
+            list.push("segoe_ui".into());
+            list.push("segoe_symbol".into());
+        }
+
+        cc.egui_ctx.set_fonts(fonts);
+
         let mut app = Self {
             filesystems: Vec::new(),
             selected_fs: 0,
@@ -101,6 +162,7 @@ impl FileViewerApp {
             partitions_scanned: false,
             show_all_partitions: false,
             luks_dialog: None,
+            clipboard: None,
         };
 
         // Add Windows filesystem by default
@@ -126,7 +188,7 @@ impl FileViewerApp {
         self.filesystems.push(FilesystemEntry {
             name: "Windows".to_string(),
             fs: MountedFs::Windows(windows_fs),
-            icon: "🪟",
+            icon: "\u{229E}", // ⊞
         });
     }
 
@@ -352,7 +414,7 @@ impl FileViewerApp {
                 self.filesystems.push(FilesystemEntry {
                     name: label,
                     fs: MountedFs::Linux(linux_fs),
-                    icon: "🐧",
+                    icon: "\u{1F427}", // penguin
                 });
 
                 self.status_message = Some(StatusMessage {
@@ -402,7 +464,7 @@ impl FileViewerApp {
                 self.filesystems.push(FilesystemEntry {
                     name: label,
                     fs: MountedFs::Btrfs(Box::new(btrfs_fs) as Box<dyn crate::fs::BtrfsFsOps>),
-                    icon: "🌲",
+                    icon: "\u{2663}", // ♣
                 });
 
                 self.status_message = Some(StatusMessage {
@@ -483,7 +545,7 @@ impl FileViewerApp {
             self.filesystems.push(FilesystemEntry {
                 name: label,
                 fs: MountedFs::Btrfs(Box::new(btrfs_fs) as Box<dyn crate::fs::BtrfsFsOps>),
-                icon: "🔓",
+                icon: "\u{1F513}", // unlocked
             });
 
             self.status_message = Some(StatusMessage {
@@ -599,7 +661,7 @@ impl FileViewerApp {
         let mut try_unlock = false;
 
         if let Some(ref mut dialog) = self.luks_dialog {
-            egui::Window::new("🔐 LUKS Encrypted Partition")
+            egui::Window::new("\u{1F512} LUKS Encrypted Partition")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -719,7 +781,7 @@ impl FileViewerApp {
                 // Linux partition controls
                 ui.heading("Linux Partitions");
 
-                if ui.button("🔍 Scan for partitions").clicked() {
+                if ui.button("Scan for partitions").clicked() {
                     self.scan_for_partitions();
                 }
 
@@ -738,9 +800,9 @@ impl FileViewerApp {
                         ui.group(|ui| {
                             ui.vertical(|ui| {
                                 let icon = match &partition.fs_type {
-                                    DetectedFsType::Luks { .. } => "🔐",
-                                    DetectedFsType::Btrfs => "🌲",
-                                    _ => "🐧",
+                                    DetectedFsType::Luks { .. } => "\u{1F512}",
+                                    DetectedFsType::Btrfs => "\u{2663}",
+                                    _ => "\u{1F427}",
                                 };
                                 ui.label(format!("{} {}", icon, label));
                                 ui.label(
@@ -791,7 +853,7 @@ impl FileViewerApp {
 
                             ui.group(|ui| {
                                 ui.vertical(|ui| {
-                                    let icon = if is_linux { "🐧" } else { "💾" };
+                                    let icon = if is_linux { "\u{1F427}" } else { "\u{1F5B4}" };
                                     ui.label(format!(
                                         "{} Drive {} Part {}",
                                         icon, drive_num, part.partition_number
@@ -839,7 +901,7 @@ impl FileViewerApp {
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         ui.heading("Preview");
-                        if ui.button("✖").clicked() {
+                        if ui.button("\u{2716}").clicked() {
                             self.preview_content = None;
                         }
                     });
@@ -913,9 +975,273 @@ impl FileViewerApp {
             });
         });
     }
+
+    // ── File operation handlers ───────────────────────────────────────
+
+    /// Handle a `FileBrowserAction` returned by the browser widget.
+    fn handle_browser_action(&mut self, action: FileBrowserAction, ctx: &Context) {
+        match action {
+            FileBrowserAction::OpenFile(path) => {
+                self.preview_file(&path, ctx);
+            }
+            FileBrowserAction::CopyEntries(entries) => {
+                self.clipboard = Some(Clipboard {
+                    op: ClipboardOp::Copy,
+                    source_fs: self.selected_fs,
+                    entries,
+                });
+                self.status_message = Some(StatusMessage {
+                    text: "Copied to clipboard".to_string(),
+                    is_error: false,
+                });
+            }
+            FileBrowserAction::CutEntries(entries) => {
+                self.clipboard = Some(Clipboard {
+                    op: ClipboardOp::Cut,
+                    source_fs: self.selected_fs,
+                    entries,
+                });
+                self.status_message = Some(StatusMessage {
+                    text: "Cut to clipboard".to_string(),
+                    is_error: false,
+                });
+            }
+            FileBrowserAction::PasteInto(target_dir) => {
+                self.paste_clipboard(&target_dir);
+                // Refresh browser after paste
+                if let Some(entry) = self.filesystems.get(self.selected_fs) {
+                    self.browser.refresh(&entry.fs);
+                }
+            }
+            FileBrowserAction::RenamePath(old_path, new_name) => {
+                self.rename_entry(&old_path, &new_name);
+                if let Some(entry) = self.filesystems.get(self.selected_fs) {
+                    self.browser.refresh(&entry.fs);
+                }
+            }
+            FileBrowserAction::DeletePath(path) => {
+                self.delete_entry(&path);
+                if let Some(entry) = self.filesystems.get(self.selected_fs) {
+                    self.browser.refresh(&entry.fs);
+                }
+            }
+            FileBrowserAction::CreateDirectory(parent, name) => {
+                self.create_directory(&parent, &name);
+                if let Some(entry) = self.filesystems.get(self.selected_fs) {
+                    self.browser.refresh(&entry.fs);
+                }
+            }
+        }
+    }
+
+    /// Paste clipboard contents into `target_dir`.
+    fn paste_clipboard(&mut self, target_dir: &str) {
+        let clipboard = match self.clipboard.clone() {
+            Some(c) => c,
+            None => {
+                self.status_message = Some(StatusMessage {
+                    text: "Nothing on the clipboard".to_string(),
+                    is_error: true,
+                });
+                return;
+            }
+        };
+
+        let dest_fs = match self.filesystems.get(self.selected_fs) {
+            Some(e) => &e.fs,
+            None => return,
+        };
+
+        if !dest_fs.is_writable() {
+            self.status_message = Some(StatusMessage {
+                text: "Destination filesystem is read-only".to_string(),
+                is_error: true,
+            });
+            return;
+        }
+
+        let same_fs = clipboard.source_fs == self.selected_fs;
+        let mut ok_count = 0usize;
+        let mut err_count = 0usize;
+
+        for src_entry in &clipboard.entries {
+            let dest_path = dest_fs
+                .unique_destination(target_dir, &src_entry.metadata.name)
+                .to_string_lossy()
+                .to_string();
+
+            let result: Result<(), crate::fs::FsError> = if same_fs {
+                // Same (Windows) filesystem — use native operations
+                if clipboard.op == ClipboardOp::Cut {
+                    dest_fs.move_path(&src_entry.path, &dest_path)
+                } else if src_entry.metadata.is_dir() {
+                    dest_fs.copy_dir(&src_entry.path, &dest_path)
+                } else {
+                    dest_fs.copy_file(&src_entry.path, &dest_path)
+                }
+            } else {
+                // Cross-filesystem: read from source, write to destination.
+                // Cut from a read-only fs is just a copy.
+                let source_fs = match self.filesystems.get(clipboard.source_fs) {
+                    Some(e) => &e.fs,
+                    None => {
+                        err_count += 1;
+                        continue;
+                    }
+                };
+                self.cross_fs_copy(
+                    source_fs,
+                    &src_entry.path,
+                    src_entry.metadata.is_dir(),
+                    dest_fs,
+                    &dest_path,
+                )
+            };
+
+            match result {
+                Ok(()) => ok_count += 1,
+                Err(e) => {
+                    err_count += 1;
+                    self.status_message = Some(StatusMessage {
+                        text: format!("Error pasting \"{}\": {}", src_entry.metadata.name, e),
+                        is_error: true,
+                    });
+                }
+            }
+        }
+
+        // If cut was successful, clear the clipboard
+        if clipboard.op == ClipboardOp::Cut && err_count == 0 {
+            self.clipboard = None;
+        }
+
+        if err_count == 0 {
+            let verb = if clipboard.op == ClipboardOp::Cut {
+                "Moved"
+            } else {
+                "Pasted"
+            };
+            self.status_message = Some(StatusMessage {
+                text: format!("{} {} item(s)", verb, ok_count),
+                is_error: false,
+            });
+        }
+    }
+
+    /// Copy a single entry (file or directory) across filesystems by reading
+    /// from `src_fs` and writing to `dst_fs`.
+    fn cross_fs_copy(
+        &self,
+        src_fs: &MountedFs,
+        src_path: &str,
+        is_dir: bool,
+        dst_fs: &MountedFs,
+        dst_path: &str,
+    ) -> Result<(), crate::fs::FsError> {
+        if is_dir {
+            dst_fs.create_dir(dst_path)?;
+            let children = src_fs.list_dir(src_path)?;
+            for child in &children {
+                let child_dst = format!(
+                    "{}{}{}",
+                    dst_path,
+                    std::path::MAIN_SEPARATOR,
+                    child.metadata.name
+                );
+                self.cross_fs_copy(
+                    src_fs,
+                    &child.path,
+                    child.metadata.is_dir(),
+                    dst_fs,
+                    &child_dst,
+                )?;
+            }
+            Ok(())
+        } else {
+            let data = src_fs.read_file(src_path)?;
+            dst_fs.write_file(dst_path, &data)
+        }
+    }
+
+    /// Rename an entry (file or directory).
+    fn rename_entry(&mut self, old_path: &str, new_name: &str) {
+        let fs = match self.filesystems.get(self.selected_fs) {
+            Some(e) => &e.fs,
+            None => return,
+        };
+
+        // Build the new full path by replacing the last component
+        let new_path = match Path::new(old_path).parent() {
+            Some(parent) => parent.join(new_name).to_string_lossy().to_string(),
+            None => new_name.to_string(),
+        };
+
+        match fs.rename(old_path, &new_path) {
+            Ok(()) => {
+                self.status_message = Some(StatusMessage {
+                    text: format!("Renamed to \"{}\"", new_name),
+                    is_error: false,
+                });
+            }
+            Err(e) => {
+                self.status_message = Some(StatusMessage {
+                    text: format!("Rename failed: {}", e),
+                    is_error: true,
+                });
+            }
+        }
+    }
+
+    /// Delete a file or directory.
+    fn delete_entry(&mut self, path: &str) {
+        let fs = match self.filesystems.get(self.selected_fs) {
+            Some(e) => &e.fs,
+            None => return,
+        };
+
+        match fs.delete(path) {
+            Ok(()) => {
+                self.status_message = Some(StatusMessage {
+                    text: "Deleted successfully".to_string(),
+                    is_error: false,
+                });
+            }
+            Err(e) => {
+                self.status_message = Some(StatusMessage {
+                    text: format!("Delete failed: {}", e),
+                    is_error: true,
+                });
+            }
+        }
+    }
+
+    /// Create a new directory inside `parent`.
+    fn create_directory(&mut self, parent: &str, name: &str) {
+        let fs = match self.filesystems.get(self.selected_fs) {
+            Some(e) => &e.fs,
+            None => return,
+        };
+
+        let full = Path::new(parent).join(name).to_string_lossy().to_string();
+
+        match fs.create_dir(&full) {
+            Ok(()) => {
+                self.status_message = Some(StatusMessage {
+                    text: format!("Created folder \"{}\"", name),
+                    is_error: false,
+                });
+            }
+            Err(e) => {
+                self.status_message = Some(StatusMessage {
+                    text: format!("Failed to create folder: {}", e),
+                    is_error: true,
+                });
+            }
+        }
+    }
 }
 
-impl eframe::App for FileViewerApp {
+impl eframe::App for FileExplorerApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         // Render LUKS dialog if open
         self.render_luks_dialog(ctx);
@@ -934,8 +1260,8 @@ impl eframe::App for FileViewerApp {
             if let Some(entry) = self.filesystems.get(self.selected_fs) {
                 let action = self.browser.ui(ui, &entry.fs);
 
-                if let Some(FileBrowserAction::OpenFile(path)) = action {
-                    self.preview_file(&path, ctx);
+                if let Some(browser_action) = action {
+                    self.handle_browser_action(browser_action, ctx);
                 }
             } else {
                 ui.centered_and_justified(|ui| {

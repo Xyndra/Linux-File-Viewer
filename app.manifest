@@ -1,16 +1,17 @@
-<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <assemblyIdentity
-    version="1.0.0.0"
-    processorArchitecture="*"
-    name="LinuxFileViewer"
-    type="win32"
-  />
-  <description>Linux File Viewer - Access Windows and Linux filesystems</description>
+        version="1.0.0.0"
+        processorArchitecture="*"
+        name="LinuxFileExplorer"
+        type="win32"
+    />
+  <description
+    >Linux File Explorer - Access Windows and Linux filesystems</description>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>
-        <requestedExecutionLevel level="requireAdministrator" uiAccess="false" />
+        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
       </requestedPrivileges>
     </security>
   </trustInfo>
@@ -28,8 +29,12 @@
   </compatibility>
   <application xmlns="urn:schemas-microsoft-com:asm.v3">
     <windowsSettings>
-      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
-      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+      <dpiAware
+                xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings"
+            >true/pm</dpiAware>
+      <dpiAwareness
+                xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings"
+            >PerMonitorV2</dpiAwareness>
     </windowsSettings>
   </application>
 </assembly>

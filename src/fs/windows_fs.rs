@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 
@@ -191,6 +191,160 @@ impl WindowsFs {
     pub fn parent(&self, path: &str) -> Option<String> {
         let path = Path::new(path);
         path.parent().map(|p| p.to_string_lossy().to_string())
+    }
+
+    // ── Write operations ──────────────────────────────────────────────
+
+    /// Write data to a file, creating it if it doesn't exist and overwriting if it does
+    pub fn write_file(&self, path: &str, data: &[u8]) -> FsResult<()> {
+        fs::write(path, data).map_err(|e| match e.kind() {
+            std::io::ErrorKind::PermissionDenied => FsError::PermissionDenied(path.to_string()),
+            _ => FsError::Io(e),
+        })
+    }
+
+    /// Delete a file or directory (directories are removed recursively)
+    pub fn delete(&self, path: &str) -> FsResult<()> {
+        let p = Path::new(path);
+        if !p.exists() {
+            return Err(FsError::NotFound(path.to_string()));
+        }
+
+        if p.is_dir() {
+            fs::remove_dir_all(p)
+        } else {
+            fs::remove_file(p)
+        }
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::PermissionDenied => FsError::PermissionDenied(path.to_string()),
+            _ => FsError::Io(e),
+        })
+    }
+
+    /// Rename (or move within the same volume) a file or directory
+    pub fn rename(&self, old_path: &str, new_path: &str) -> FsResult<()> {
+        fs::rename(old_path, new_path).map_err(|e| match e.kind() {
+            std::io::ErrorKind::PermissionDenied => FsError::PermissionDenied(old_path.to_string()),
+            std::io::ErrorKind::NotFound => FsError::NotFound(old_path.to_string()),
+            _ => FsError::Io(e),
+        })
+    }
+
+    /// Create a directory (and all missing parents)
+    pub fn create_dir(&self, path: &str) -> FsResult<()> {
+        fs::create_dir_all(path).map_err(|e| match e.kind() {
+            std::io::ErrorKind::PermissionDenied => FsError::PermissionDenied(path.to_string()),
+            _ => FsError::Io(e),
+        })
+    }
+
+    /// Copy a single file to a destination path
+    pub fn copy_file(&self, src: &str, dst: &str) -> FsResult<()> {
+        // Make sure the destination parent directory exists
+        if let Some(parent) = Path::new(dst).parent() {
+            if !parent.exists() {
+                fs::create_dir_all(parent).map_err(FsError::Io)?;
+            }
+        }
+        fs::copy(src, dst).map_err(|e| match e.kind() {
+            std::io::ErrorKind::PermissionDenied => FsError::PermissionDenied(src.to_string()),
+            std::io::ErrorKind::NotFound => FsError::NotFound(src.to_string()),
+            _ => FsError::Io(e),
+        })?;
+        Ok(())
+    }
+
+    /// Recursively copy a directory and all its contents
+    pub fn copy_dir(&self, src: &str, dst: &str) -> FsResult<()> {
+        let src_path = Path::new(src);
+        let dst_path = Path::new(dst);
+
+        if !src_path.is_dir() {
+            return Err(FsError::NotADirectory(src.to_string()));
+        }
+
+        fs::create_dir_all(dst_path).map_err(FsError::Io)?;
+
+        Self::copy_dir_recursive(src_path, dst_path)
+    }
+
+    fn copy_dir_recursive(src: &Path, dst: &Path) -> FsResult<()> {
+        for entry in fs::read_dir(src).map_err(FsError::Io)? {
+            let entry = entry.map_err(FsError::Io)?;
+            let src_child = entry.path();
+            let dst_child = dst.join(entry.file_name());
+
+            if src_child.is_dir() {
+                fs::create_dir_all(&dst_child).map_err(FsError::Io)?;
+                Self::copy_dir_recursive(&src_child, &dst_child)?;
+            } else {
+                fs::copy(&src_child, &dst_child).map_err(FsError::Io)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Move a file or directory to a new location.
+    /// Works across drives by falling back to copy-then-delete.
+    pub fn move_path(&self, src: &str, dst: &str) -> FsResult<()> {
+        // Try a fast rename first (works on the same volume)
+        match fs::rename(src, dst) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                // If it failed for a reason other than cross-device, propagate
+                // On Windows the error kind for cross-device is Other / raw OS error 17
+                let is_cross_device = e.raw_os_error() == Some(17) // EXDEV
+                    || e.raw_os_error() == Some(0x11) // same in hex
+                    || e.kind() == std::io::ErrorKind::Other;
+                if !is_cross_device {
+                    return Err(match e.kind() {
+                        std::io::ErrorKind::PermissionDenied => {
+                            FsError::PermissionDenied(src.to_string())
+                        }
+                        std::io::ErrorKind::NotFound => FsError::NotFound(src.to_string()),
+                        _ => FsError::Io(e),
+                    });
+                }
+                // Cross-device: fall through to copy + delete
+            }
+        }
+
+        let src_path = Path::new(src);
+        if src_path.is_dir() {
+            self.copy_dir(src, dst)?;
+            fs::remove_dir_all(src).map_err(FsError::Io)?;
+        } else {
+            self.copy_file(src, dst)?;
+            fs::remove_file(src).map_err(FsError::Io)?;
+        }
+        Ok(())
+    }
+
+    /// Determine a unique destination path so we don't silently overwrite.
+    /// Given `/some/dir` and filename `hello.txt`, if `hello.txt` already
+    /// exists it returns `hello (1).txt`, `hello (2).txt`, etc.
+    pub fn unique_destination(dir: &str, name: &str) -> PathBuf {
+        let base = Path::new(dir).join(name);
+        if !base.exists() {
+            return base;
+        }
+
+        let stem = Path::new(name)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let ext = Path::new(name)
+            .extension()
+            .map(|s| format!(".{}", s.to_string_lossy()))
+            .unwrap_or_default();
+
+        for i in 1u32.. {
+            let candidate = Path::new(dir).join(format!("{} ({}){}", stem, i, ext));
+            if !candidate.exists() {
+                return candidate;
+            }
+        }
+        base // unreachable in practice
     }
 }
 

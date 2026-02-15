@@ -1,14 +1,19 @@
-//! Linux File Viewer
+//! Linux File Explorer
 //!
 //! A Windows application for browsing both Windows and Linux filesystems.
 //!
-//! This application provides read-only access to:
+//! This application provides access to:
 //! - Native Windows drives (NTFS, FAT32, exFAT, etc.)
 //! - Linux filesystems (ext4, btrfs) on raw partitions
 //! - LUKS-encrypted Linux partitions
 //!
 //! Note: Accessing Linux partitions requires running as Administrator.
-//! The application will automatically request elevation if needed.
+//! The application will request elevation on startup if needed.
+
+// Hide the console window when launched by double-clicking the exe.
+// When launched from an existing console (e.g. `cargo run --release`), the
+// console remains visible because it's already attached.
+#![windows_subsystem = "windows"]
 
 mod fs;
 mod ui;
@@ -26,7 +31,6 @@ fn is_running_as_admin() -> bool {
     unsafe {
         let mut token_handle = HANDLE::default();
 
-        // Open the process token
         if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token_handle).is_err() {
             return false;
         }
@@ -42,7 +46,6 @@ fn is_running_as_admin() -> bool {
             &mut return_length,
         );
 
-        // Close the token handle
         let _ = windows::Win32::Foundation::CloseHandle(token_handle);
 
         if result.is_ok() {
@@ -53,15 +56,13 @@ fn is_running_as_admin() -> bool {
     }
 }
 
-/// Restart the current process with administrator privileges
-/// Returns true if the elevation was initiated (process should exit)
-/// Returns false if elevation failed or was cancelled
+/// Restart the current process with administrator privileges using ShellExecuteW "runas".
+/// Returns true if the elevation was initiated (caller should exit).
 fn restart_as_admin() -> bool {
     use windows::core::PCWSTR;
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
-    // Get the current executable path
     let exe_path = match std::env::current_exe() {
         Ok(path) => path,
         Err(_) => return false,
@@ -69,11 +70,10 @@ fn restart_as_admin() -> bool {
 
     let exe_path_str = exe_path.to_string_lossy();
 
-    // Convert strings to wide (UTF-16) format
     let operation: Vec<u16> = "runas\0".encode_utf16().collect();
     let file: Vec<u16> = format!("{}\0", exe_path_str).encode_utf16().collect();
 
-    // Get command line arguments (skip the executable name)
+    // Forward any command-line arguments
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args_str = args.join(" ");
     let parameters: Vec<u16> = format!("{}\0", args_str).encode_utf16().collect();
@@ -93,82 +93,38 @@ fn restart_as_admin() -> bool {
     }
 }
 
-/// Show a message box with an error
-fn show_error_message(title: &str, message: &str) {
-    use windows::core::PCWSTR;
-    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
-
-    let title_wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
-    let message_wide: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
-
-    unsafe {
-        MessageBoxW(
-            None,
-            PCWSTR(message_wide.as_ptr()),
-            PCWSTR(title_wide.as_ptr()),
-            MB_OK | MB_ICONERROR,
-        );
-    }
-}
-
-/// Check if --no-admin-check flag is present (debug builds only)
-fn should_skip_admin_check() -> bool {
-    #[cfg(debug_assertions)]
-    {
-        std::env::args().any(|arg| arg == "--no-admin-check" || arg == "-n")
-    }
-    #[cfg(not(debug_assertions))]
-    {
-        false
-    }
-}
-
 fn main() -> eframe::Result<()> {
-    // Set up logging for debug builds
     #[cfg(debug_assertions)]
     {
         // SAFETY: This is only called once at startup before any threads are spawned
         unsafe { std::env::set_var("RUST_BACKTRACE", "1") };
     }
 
-    // Check for administrator privileges (can be skipped in debug builds)
-    let skip_admin_check = should_skip_admin_check();
-
-    if !skip_admin_check && !is_running_as_admin() {
-        // Try to restart with admin privileges
+    // Request elevation if not already running as admin
+    if !is_running_as_admin() {
         if restart_as_admin() {
-            // Elevation initiated, exit current process
+            // The elevated process has been spawned — exit this one
             std::process::exit(0);
-        } else {
-            // Elevation failed or was cancelled by user
-            show_error_message(
-                "Administrator Privileges Required",
-                "Linux File Viewer requires administrator privileges to access raw disk partitions.\n\n\
-                 The UAC elevation request was cancelled or failed.\n\n\
-                 Please try running the application again and accept the UAC prompt,\n\
-                 or right-click the application and select 'Run as administrator'.\n\n\
-                 The application will now exit."
-            );
-            std::process::exit(1);
         }
-    }
-
-    #[cfg(debug_assertions)]
-    if skip_admin_check {
-        eprintln!("Warning: Running without admin check. Linux partition access will not work.");
+        // If the user cancelled the UAC prompt or it failed, continue
+        // without admin. Windows filesystem browsing will still work,
+        // but raw disk access for Linux partitions will not.
+        eprintln!(
+            "Warning: not running as Administrator. Linux partition access will not be available."
+        );
     }
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Linux File Viewer")
+            .with_title("Linux File Explorer")
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([800.0, 600.0]),
         ..Default::default()
     };
 
     eframe::run_native(
-        "Linux File Viewer",
+        "Linux File Explorer",
         options,
-        Box::new(|cc| Ok(Box::new(ui::FileViewerApp::new(cc)))),
+        Box::new(|cc| Ok(Box::new(ui::FileExplorerApp::new(cc)))),
     )
 }

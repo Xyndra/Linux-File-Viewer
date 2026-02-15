@@ -28,6 +28,38 @@ pub struct FileBrowser {
     history_index: usize,
     /// Search/filter text
     filter_text: String,
+    /// Inline rename state
+    rename_state: Option<RenameState>,
+    /// New folder dialog state
+    new_folder_state: Option<NewFolderState>,
+    /// Delete confirmation state
+    delete_confirm: Option<DeleteConfirmState>,
+}
+
+/// State for inline renaming
+struct RenameState {
+    /// Index of the entry being renamed (in the unfiltered entries list)
+    original_index: usize,
+    /// The new name being typed
+    new_name: String,
+    /// Whether focus has been set on the text edit yet
+    focus_set: bool,
+}
+
+/// State for the new-folder dialog
+struct NewFolderState {
+    name: String,
+    focus_set: bool,
+}
+
+/// State for delete confirmation
+struct DeleteConfirmState {
+    /// Path to delete
+    path: String,
+    /// Display name
+    name: String,
+    /// Whether it's a directory
+    is_dir: bool,
 }
 
 impl FileBrowser {
@@ -41,6 +73,9 @@ impl FileBrowser {
             history: Vec::new(),
             history_index: 0,
             filter_text: String::new(),
+            rename_state: None,
+            new_folder_state: None,
+            delete_confirm: None,
         }
     }
 
@@ -116,6 +151,9 @@ impl FileBrowser {
         self.selected_index = None;
         self.error_message = None;
         self.filter_text.clear();
+        self.rename_state = None;
+        self.new_folder_state = None;
+        self.delete_confirm = None;
 
         match fs.list_dir(path) {
             Ok(entries) => {
@@ -150,15 +188,14 @@ impl FileBrowser {
                     return false;
                 }
                 // Filter by search text
-                if !self.filter_text.is_empty() {
-                    if !entry
+                if !self.filter_text.is_empty()
+                    && !entry
                         .metadata
                         .name
                         .to_lowercase()
                         .contains(&self.filter_text.to_lowercase())
-                    {
-                        return false;
-                    }
+                {
+                    return false;
                 }
                 true
             })
@@ -169,12 +206,68 @@ impl FileBrowser {
     /// Render the file browser UI
     pub fn ui(&mut self, ui: &mut Ui, fs: &MountedFs) -> Option<FileBrowserAction> {
         let mut action = None;
+        let is_writable = fs.is_writable();
+
+        // ── Keyboard shortcuts ────────────────────────────────────────
+        // Only process when no inline editor is active
+        if self.rename_state.is_none() && self.new_folder_state.is_none() {
+            let kb = &ui.input(|i| {
+                (
+                    i.modifiers.ctrl,
+                    i.key_pressed(egui::Key::C),
+                    i.key_pressed(egui::Key::X),
+                    i.key_pressed(egui::Key::V),
+                    i.key_pressed(egui::Key::Delete),
+                    i.key_pressed(egui::Key::F2),
+                    i.key_pressed(egui::Key::N),
+                )
+            });
+            let (ctrl, c, x, v, del, f2, n) = *kb;
+
+            if let Some(idx) = self.selected_index {
+                if let Some(entry) = self.entries.get(idx).cloned() {
+                    if ctrl && c {
+                        action = Some(FileBrowserAction::CopyEntries(vec![entry.clone()]));
+                    }
+                    if ctrl && x && is_writable {
+                        action = Some(FileBrowserAction::CutEntries(vec![entry.clone()]));
+                    }
+                    if del && is_writable {
+                        self.delete_confirm = Some(DeleteConfirmState {
+                            path: entry.path.clone(),
+                            name: entry.metadata.name.clone(),
+                            is_dir: entry.metadata.is_dir(),
+                        });
+                    }
+                    if f2 && is_writable {
+                        self.rename_state = Some(RenameState {
+                            original_index: idx,
+                            new_name: entry.metadata.name.clone(),
+                            focus_set: false,
+                        });
+                    }
+                }
+            }
+
+            if ctrl && v {
+                action = Some(FileBrowserAction::PasteInto(self.current_path.clone()));
+            }
+            if ctrl && n && is_writable {
+                self.new_folder_state = Some(NewFolderState {
+                    name: String::new(),
+                    focus_set: false,
+                });
+            }
+        }
 
         // Navigation bar
         ui.horizontal(|ui| {
             // Back button
             if ui
-                .add_enabled(self.history_index > 0, egui::Button::new("⬅"))
+                .add_enabled(
+                    self.history_index > 0,
+                    egui::Button::new("\u{2190}"), // ←
+                )
                 .on_hover_text("Back")
                 .clicked()
             {
@@ -185,7 +278,7 @@ impl FileBrowser {
             if ui
                 .add_enabled(
                     self.history_index < self.history.len().saturating_sub(1),
-                    egui::Button::new("➡"),
+                    egui::Button::new("\u{2192}"), // →
                 )
                 .on_hover_text("Forward")
                 .clicked()
@@ -197,7 +290,7 @@ impl FileBrowser {
             if ui
                 .add_enabled(
                     fs.parent(&self.current_path).is_some(),
-                    egui::Button::new("⬆"),
+                    egui::Button::new("\u{2191}"), // ↑
                 )
                 .on_hover_text("Up")
                 .clicked()
@@ -206,7 +299,11 @@ impl FileBrowser {
             }
 
             // Refresh button
-            if ui.button("🔄").on_hover_text("Refresh").clicked() {
+            if ui
+                .button("\u{21BB}") // ↻
+                .on_hover_text("Refresh")
+                .clicked()
+            {
                 self.refresh(fs);
             }
 
@@ -230,7 +327,7 @@ impl FileBrowser {
 
         // Filter/search bar
         ui.horizontal(|ui| {
-            ui.label("🔍");
+            ui.label("Filter:");
             ui.add(
                 egui::TextEdit::singleline(&mut self.filter_text)
                     .hint_text("Filter files...")
@@ -240,6 +337,18 @@ impl FileBrowser {
             ui.separator();
 
             ui.checkbox(&mut self.show_hidden, "Show hidden");
+
+            // New folder button (writable filesystems only)
+            if is_writable {
+                ui.separator();
+                if ui.button("\u{2795} New folder").clicked() {
+                    // ✚
+                    self.new_folder_state = Some(NewFolderState {
+                        name: String::new(),
+                        focus_set: false,
+                    });
+                }
+            }
         });
 
         ui.separator();
@@ -250,9 +359,76 @@ impl FileBrowser {
             ui.separator();
         }
 
+        // ── New Folder inline editor ──────────────────────────────────
+        if self.new_folder_state.is_some() {
+            let mut nf = self.new_folder_state.take().unwrap();
+            let mut keep = true;
+            ui.horizontal(|ui| {
+                ui.label("\u{1F4C1} New folder name:"); // 📁 — will render via symbol font
+                let te = ui.add(
+                    egui::TextEdit::singleline(&mut nf.name)
+                        .desired_width(250.0)
+                        .hint_text("folder name"),
+                );
+                if !nf.focus_set {
+                    te.request_focus();
+                    nf.focus_set = true;
+                }
+                let enter = te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if ui.button("\u{2714} Create").clicked() || enter {
+                    // ✔
+                    let name = nf.name.trim().to_string();
+                    if !name.is_empty() {
+                        action = Some(FileBrowserAction::CreateDirectory(
+                            self.current_path.clone(),
+                            name,
+                        ));
+                    }
+                    keep = false;
+                }
+                if ui.button("\u{2716} Cancel").clicked()
+                    || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                {
+                    // ✖
+                    keep = false;
+                }
+            });
+            ui.separator();
+            if keep {
+                self.new_folder_state = Some(nf);
+            }
+        }
+
+        // ── Delete confirmation bar ──────────────────────────────────
+        let mut clear_delete = false;
+        if let Some(ref dc) = self.delete_confirm {
+            ui.horizontal(|ui| {
+                let kind = if dc.is_dir { "directory" } else { "file" };
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    format!("Delete {} \"{}\"?", kind, dc.name),
+                );
+                if ui.button("Yes, delete").clicked() {
+                    action = Some(FileBrowserAction::DeletePath(dc.path.clone()));
+                    clear_delete = true;
+                }
+                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    clear_delete = true;
+                }
+            });
+            ui.separator();
+        }
+        if clear_delete {
+            self.delete_confirm = None;
+        }
+
         // File listing
         let filtered = self.filtered_entries();
         let row_height = 24.0;
+
+        // Track whether any row handled a secondary (right) click so we
+        // can fall back to a background context menu if none did.
+        let mut row_ctx_opened = false;
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -262,6 +438,58 @@ impl FileBrowser {
                         let original_idx = *original_idx;
                         let is_selected = self.selected_index == Some(original_idx);
 
+                        // ── Inline rename mode ────────────────────────
+                        let is_renaming = self
+                            .rename_state
+                            .as_ref()
+                            .map_or(false, |r| r.original_index == original_idx);
+
+                        if is_renaming {
+                            let mut rs = self.rename_state.take().unwrap();
+                            let mut keep = true;
+                            ui.horizontal(|ui| {
+                                let icon = match entry.metadata.entry_type {
+                                    EntryType::Directory => Self::DIR_ICON,
+                                    EntryType::File => Self::file_icon(&entry.metadata.name),
+                                    EntryType::Symlink => Self::SYMLINK_ICON,
+                                    EntryType::Other => Self::OTHER_ICON,
+                                };
+                                ui.label(icon);
+                                let te = ui.add(
+                                    egui::TextEdit::singleline(&mut rs.new_name)
+                                        .desired_width(300.0),
+                                );
+                                if !rs.focus_set {
+                                    te.request_focus();
+                                    rs.focus_set = true;
+                                }
+                                let enter = te.lost_focus()
+                                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                if enter || ui.button("\u{2714}").clicked() {
+                                    // ✔
+                                    let new_name = rs.new_name.trim().to_string();
+                                    if !new_name.is_empty() && new_name != entry.metadata.name {
+                                        action = Some(FileBrowserAction::RenamePath(
+                                            entry.path.clone(),
+                                            new_name,
+                                        ));
+                                    }
+                                    keep = false;
+                                }
+                                if ui.button("\u{2716}").clicked()
+                                    || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                                {
+                                    // ✖
+                                    keep = false;
+                                }
+                            });
+                            if keep {
+                                self.rename_state = Some(rs);
+                            }
+                            continue;
+                        }
+
+                        // ── Normal row ────────────────────────────────
                         let response = ui.allocate_response(
                             Vec2::new(ui.available_width(), row_height),
                             egui::Sense::click(),
@@ -288,10 +516,10 @@ impl FileBrowser {
 
                         // Icon
                         let icon = match entry.metadata.entry_type {
-                            EntryType::Directory => "📁",
+                            EntryType::Directory => Self::DIR_ICON,
                             EntryType::File => Self::file_icon(&entry.metadata.name),
-                            EntryType::Symlink => "🔗",
-                            EntryType::Other => "❓",
+                            EntryType::Symlink => Self::SYMLINK_ICON,
+                            EntryType::Other => Self::OTHER_ICON,
                         };
 
                         let icon_pos = rect.left_center() + egui::vec2(8.0, 0.0);
@@ -344,7 +572,7 @@ impl FileBrowser {
                             );
                         }
 
-                        // Handle clicks
+                        // Handle left clicks
                         if response.clicked() {
                             self.selected_index = Some(original_idx);
                         }
@@ -357,19 +585,78 @@ impl FileBrowser {
                             }
                         }
 
-                        // Context menu
+                        // Also select on right-click so the context menu
+                        // always applies to the clicked item.
+                        if response.secondary_clicked() {
+                            self.selected_index = Some(original_idx);
+                            row_ctx_opened = true;
+                        }
+
+                        // Context menu on individual entries
                         response.context_menu(|ui| {
+                            // Open / View
                             if entry.metadata.is_dir() {
                                 if ui.button("Open").clicked() {
                                     self.navigate_to(&entry.path, fs);
                                     ui.close_menu();
                                 }
-                            } else {
-                                if ui.button("View").clicked() {
-                                    action = Some(FileBrowserAction::OpenFile(entry.path.clone()));
+                            } else if ui.button("View").clicked() {
+                                action = Some(FileBrowserAction::OpenFile(entry.path.clone()));
+                                ui.close_menu();
+                            }
+
+                            ui.separator();
+
+                            // Copy (always available – works across filesystems)
+                            if ui.button("Copy        Ctrl+C").clicked() {
+                                action = Some(FileBrowserAction::CopyEntries(vec![entry.clone()]));
+                                ui.close_menu();
+                            }
+
+                            // Cut (writable only)
+                            if is_writable {
+                                if ui.button("Cut         Ctrl+X").clicked() {
+                                    action =
+                                        Some(FileBrowserAction::CutEntries(vec![entry.clone()]));
                                     ui.close_menu();
                                 }
                             }
+
+                            // Paste
+                            if ui.button("Paste       Ctrl+V").clicked() {
+                                let target = if entry.metadata.is_dir() {
+                                    entry.path.clone()
+                                } else {
+                                    self.current_path.clone()
+                                };
+                                action = Some(FileBrowserAction::PasteInto(target));
+                                ui.close_menu();
+                            }
+
+                            if is_writable {
+                                ui.separator();
+
+                                if ui.button("Rename      F2").clicked() {
+                                    self.rename_state = Some(RenameState {
+                                        original_index: original_idx,
+                                        new_name: entry.metadata.name.clone(),
+                                        focus_set: false,
+                                    });
+                                    ui.close_menu();
+                                }
+
+                                if ui.button("Delete      Del").clicked() {
+                                    self.delete_confirm = Some(DeleteConfirmState {
+                                        path: entry.path.clone(),
+                                        name: entry.metadata.name.clone(),
+                                        is_dir: entry.metadata.is_dir(),
+                                    });
+                                    ui.close_menu();
+                                }
+                            }
+
+                            ui.separator();
+
                             if ui.button("Copy path").clicked() {
                                 ui.ctx().copy_text(entry.path.clone());
                                 ui.close_menu();
@@ -378,6 +665,38 @@ impl FileBrowser {
                     }
                 }
             });
+
+        // Background context menu: only when no row handled the right-click.
+        // We detect a secondary click anywhere in the central area manually.
+        if !row_ctx_opened {
+            let bg_secondary =
+                ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary));
+            if bg_secondary {
+                // egui popup menus are id-based; open one tied to the browser bg
+                ui.memory_mut(|mem| mem.toggle_popup(ui.id().with("browser_bg_ctx")));
+            }
+            egui::popup_below_widget(
+                ui,
+                ui.id().with("browser_bg_ctx"),
+                &ui.response(),
+                egui::PopupCloseBehavior::CloseOnClickOutside,
+                |ui| {
+                    if ui.button("Paste here   Ctrl+V").clicked() {
+                        action = Some(FileBrowserAction::PasteInto(self.current_path.clone()));
+                        ui.close_menu();
+                    }
+                    if is_writable {
+                        if ui.button("New folder   Ctrl+N").clicked() {
+                            self.new_folder_state = Some(NewFolderState {
+                                name: String::new(),
+                                focus_set: false,
+                            });
+                            ui.close_menu();
+                        }
+                    }
+                },
+            );
+        }
 
         // Status bar
         ui.separator();
@@ -402,33 +721,43 @@ impl FileBrowser {
         action
     }
 
+    // ── Icon constants ────────────────────────────────────────────────
+    // All icons are single Unicode code points from Segoe UI Symbol so
+    // they render natively on Windows without colour-emoji issues.
+
+    const DIR_ICON: &'static str = "\u{1F4C1}"; // 📁
+    const SYMLINK_ICON: &'static str = "\u{1F517}"; // 🔗
+    const OTHER_ICON: &'static str = "?";
+
     /// Get appropriate icon for a file based on extension
     fn file_icon(filename: &str) -> &'static str {
         let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
 
         match ext.as_str() {
             // Images
-            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "ico" | "svg" | "webp" => "🖼",
+            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "ico" | "svg" | "webp" => "\u{1F5BC}", // 🖼
             // Documents
-            "pdf" => "📕",
-            "doc" | "docx" | "odt" => "📘",
-            "xls" | "xlsx" | "ods" => "📗",
-            "ppt" | "pptx" | "odp" => "📙",
-            "txt" | "md" | "rst" => "📄",
+            "pdf" => "\u{1F4D5}",                  // 📕
+            "doc" | "docx" | "odt" => "\u{1F4D8}", // 📘
+            "xls" | "xlsx" | "ods" => "\u{1F4D7}", // 📗
+            "ppt" | "pptx" | "odp" => "\u{1F4D9}", // 📙
+            "txt" | "md" | "rst" => "\u{1F4C4}",   // 📄
             // Code
-            "rs" | "py" | "js" | "ts" | "c" | "cpp" | "h" | "hpp" | "java" | "go" | "rb" => "📜",
-            "html" | "css" | "scss" | "sass" => "🌐",
-            "json" | "yaml" | "yml" | "toml" | "xml" => "⚙",
+            "rs" | "py" | "js" | "ts" | "c" | "cpp" | "h" | "hpp" | "java" | "go" | "rb" => {
+                "\u{1F4DC}" // 📜
+            }
+            "html" | "css" | "scss" | "sass" => "\u{1F310}", // 🌐
+            "json" | "yaml" | "yml" | "toml" | "xml" => "\u{2699}", // ⚙
             // Archives
-            "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" => "📦",
+            "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" => "\u{1F4E6}", // 📦
             // Media
-            "mp3" | "wav" | "flac" | "ogg" | "m4a" => "🎵",
-            "mp4" | "mkv" | "avi" | "mov" | "webm" => "🎬",
+            "mp3" | "wav" | "flac" | "ogg" | "m4a" => "\u{266B}", // ♫
+            "mp4" | "mkv" | "avi" | "mov" | "webm" => "\u{25B6}", // ▶
             // Executables
-            "exe" | "msi" | "dll" => "⚡",
-            "sh" | "bash" | "bat" | "cmd" | "ps1" => "📟",
+            "exe" | "msi" | "dll" => "\u{2699}", // ⚙
+            "sh" | "bash" | "bat" | "cmd" | "ps1" => ">_",
             // Default
-            _ => "📄",
+            _ => "\u{1F4C4}", // 📄
         }
     }
 }
@@ -442,6 +771,18 @@ impl Default for FileBrowser {
 /// Actions that can be triggered from the file browser
 #[derive(Debug, Clone)]
 pub enum FileBrowserAction {
-    /// Request to open/view a file
+    /// Request to open/preview a file
     OpenFile(String),
+    /// Copy entries to the clipboard
+    CopyEntries(Vec<FsEntry>),
+    /// Cut entries to the clipboard (copy + delete on paste)
+    CutEntries(Vec<FsEntry>),
+    /// Paste the current clipboard contents into the given directory
+    PasteInto(String),
+    /// Rename a path: (old_path, new_name)
+    RenamePath(String, String),
+    /// Delete a path
+    DeletePath(String),
+    /// Create a directory inside the given parent with the given name
+    CreateDirectory(String, String),
 }
