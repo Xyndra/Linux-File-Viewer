@@ -11,11 +11,11 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::ptr;
 
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, HANDLE};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
-use windows::core::PCWSTR;
 
 use super::{FsError, FsResult, PartitionInfo};
 
@@ -79,8 +79,8 @@ impl RawDisk {
     }
 
     fn get_disk_geometry(handle: HANDLE) -> FsResult<(u64, u64)> {
-        use windows::Win32::System::IO::DeviceIoControl;
         use windows::Win32::System::Ioctl::IOCTL_DISK_GET_DRIVE_GEOMETRY_EX;
+        use windows::Win32::System::IO::DeviceIoControl;
 
         #[repr(C)]
         #[derive(Default)]
@@ -150,7 +150,7 @@ impl RawDisk {
 
         unsafe {
             ReadFile(self.handle, Some(buf), Some(&mut bytes_read), None)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
         }
 
         self.current_position += bytes_read as u64;
@@ -159,7 +159,9 @@ impl RawDisk {
 
     /// Perform a raw seek (sets the file pointer)
     fn raw_seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-        use windows::Win32::Storage::FileSystem::{SetFilePointerEx, FILE_BEGIN, FILE_CURRENT, FILE_END};
+        use windows::Win32::Storage::FileSystem::{
+            SetFilePointerEx, FILE_BEGIN, FILE_CURRENT, FILE_END,
+        };
 
         let (method, distance) = match pos {
             SeekFrom::Start(n) => (FILE_BEGIN, n as i64),
@@ -171,7 +173,7 @@ impl RawDisk {
 
         unsafe {
             SetFilePointerEx(self.handle, distance, Some(&mut new_position), method)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
         }
 
         self.current_position = new_position as u64;
@@ -190,7 +192,7 @@ impl RawDisk {
         let start_sector = offset / self.sector_size;
         let offset_in_start_sector = (offset % self.sector_size) as usize;
         let end_offset = offset + buffer.len() as u64;
-        let end_sector = (end_offset + self.sector_size - 1) / self.sector_size;
+        let end_sector = end_offset.div_ceil(self.sector_size);
         let num_sectors = (end_sector - start_sector) as usize;
 
         // Calculate aligned read parameters
@@ -251,7 +253,7 @@ impl Read for RawDisk {
         let start_sector = offset / self.sector_size;
         let offset_in_start_sector = (offset % self.sector_size) as usize;
         let end_offset = offset + buf.len() as u64;
-        let end_sector = (end_offset + self.sector_size - 1) / self.sector_size;
+        let end_sector = end_offset.div_ceil(self.sector_size);
         let num_sectors = (end_sector - start_sector) as usize;
 
         // Calculate aligned read parameters
@@ -439,13 +441,14 @@ pub fn detect_gpt_partitions(drive_number: u32) -> FsResult<Vec<PartitionInfo>> 
 
     // Check GPT signature
     if &header_buf[0..8] != b"EFI PART" {
-        return Err(FsError::FilesystemError("Invalid GPT signature".to_string()));
+        return Err(FsError::FilesystemError(
+            "Invalid GPT signature".to_string(),
+        ));
     }
 
     // Parse GPT header
-    let header: GptHeader = unsafe {
-        std::ptr::read_unaligned(header_buf.as_ptr() as *const GptHeader)
-    };
+    let header: GptHeader =
+        unsafe { std::ptr::read_unaligned(header_buf.as_ptr() as *const GptHeader) };
 
     let num_entries = header.num_partition_entries;
     let entry_size = header.partition_entry_size;
@@ -453,7 +456,7 @@ pub fn detect_gpt_partitions(drive_number: u32) -> FsResult<Vec<PartitionInfo>> 
 
     // Read partition entries
     let entries_size = (num_entries as u64) * (entry_size as u64);
-    let entries_sectors = (entries_size + sector_size - 1) / sector_size;
+    let entries_sectors = entries_size.div_ceil(sector_size);
     let mut entries_buf = vec![0u8; (entries_sectors * sector_size) as usize];
     disk.read_at(entries_start_lba * sector_size, &mut entries_buf)?;
 
@@ -492,7 +495,8 @@ pub fn detect_gpt_partitions(drive_number: u32) -> FsResult<Vec<PartitionInfo>> 
         for j in 0..36 {
             let char_offset = name_offset + j * 2;
             if char_offset + 2 <= entries_buf.len() {
-                let ch = u16::from_le_bytes([entries_buf[char_offset], entries_buf[char_offset + 1]]);
+                let ch =
+                    u16::from_le_bytes([entries_buf[char_offset], entries_buf[char_offset + 1]]);
                 if ch == 0 {
                     break;
                 }
@@ -538,7 +542,9 @@ pub fn detect_mbr_partitions(drive_number: u32) -> FsResult<Vec<PartitionInfo>> 
 
     // Check MBR signature (0x55AA at offset 510)
     if mbr.len() < 512 || mbr[510] != 0x55 || mbr[511] != 0xAA {
-        return Err(FsError::FilesystemError("Invalid MBR signature".to_string()));
+        return Err(FsError::FilesystemError(
+            "Invalid MBR signature".to_string(),
+        ));
     }
 
     let mut partitions = Vec::new();
@@ -561,7 +567,12 @@ pub fn detect_mbr_partitions(drive_number: u32) -> FsResult<Vec<PartitionInfo>> 
             // Check if this is an extended partition
             if entry.partition_type == 0x05 || entry.partition_type == 0x0F {
                 // Parse extended partitions recursively
-                if let Ok(extended) = parse_extended_partitions(&mut disk, start_offset, sector_size, partitions.len() as u32 + 1) {
+                if let Ok(extended) = parse_extended_partitions(
+                    &mut disk,
+                    start_offset,
+                    sector_size,
+                    partitions.len() as u32 + 1,
+                ) {
                     partitions.extend(extended);
                 }
             } else {
@@ -620,7 +631,7 @@ fn parse_extended_partitions(
             let size = entry1.size_sectors as u64 * sector_size;
 
             partitions.push(PartitionInfo {
-                device_path: format!("Extended partition"),
+                device_path: "Extended partition".to_string(),
                 label: None,
                 fs_type,
                 size,
@@ -653,9 +664,8 @@ pub fn get_partition_geometry(drive_number: u32, partition_number: u32) -> FsRes
         disk.read_at(sector_size, &mut header_buf)?;
 
         if &header_buf[0..8] == b"EFI PART" {
-            let header: GptHeader = unsafe {
-                std::ptr::read_unaligned(header_buf.as_ptr() as *const GptHeader)
-            };
+            let header: GptHeader =
+                unsafe { std::ptr::read_unaligned(header_buf.as_ptr() as *const GptHeader) };
 
             let num_entries = header.num_partition_entries;
             let entry_size = header.partition_entry_size;
@@ -663,7 +673,7 @@ pub fn get_partition_geometry(drive_number: u32, partition_number: u32) -> FsRes
 
             // Read partition entries
             let entries_size = (num_entries as u64) * (entry_size as u64);
-            let entries_sectors = (entries_size + sector_size - 1) / sector_size;
+            let entries_sectors = entries_size.div_ceil(sector_size);
             let mut entries_buf = vec![0u8; (entries_sectors * sector_size) as usize];
             disk.read_at(entries_start_lba * sector_size, &mut entries_buf)?;
 
@@ -676,7 +686,9 @@ pub fn get_partition_geometry(drive_number: u32, partition_number: u32) -> FsRes
                 }
 
                 let entry: GptPartitionEntry = unsafe {
-                    std::ptr::read_unaligned(entries_buf[offset..].as_ptr() as *const GptPartitionEntry)
+                    std::ptr::read_unaligned(
+                        entries_buf[offset..].as_ptr() as *const GptPartitionEntry
+                    )
                 };
 
                 // Check if entry is used
@@ -695,7 +707,10 @@ pub fn get_partition_geometry(drive_number: u32, partition_number: u32) -> FsRes
             }
         }
 
-        return Err(FsError::NotFound(format!("Partition {} not found in GPT", partition_number)));
+        return Err(FsError::NotFound(format!(
+            "Partition {} not found in GPT",
+            partition_number
+        )));
     }
 
     // Fall back to MBR
@@ -706,7 +721,9 @@ pub fn get_partition_geometry(drive_number: u32, partition_number: u32) -> FsRes
     disk.read_at(0, &mut mbr)?;
 
     if mbr.len() < 512 || mbr[510] != 0x55 || mbr[511] != 0xAA {
-        return Err(FsError::FilesystemError("Invalid MBR signature".to_string()));
+        return Err(FsError::FilesystemError(
+            "Invalid MBR signature".to_string(),
+        ));
     }
 
     let mut current_partition = 1u32;
@@ -736,7 +753,8 @@ pub fn get_partition_geometry(drive_number: u32, partition_number: u32) -> FsRes
                     if entry1.partition_type != 0 && entry1.size_sectors > 0 {
                         current_partition += 1;
                         if current_partition == partition_number {
-                            let start_offset = current_ebr_offset + entry1.start_lba as u64 * sector_size;
+                            let start_offset =
+                                current_ebr_offset + entry1.start_lba as u64 * sector_size;
                             let size = entry1.size_sectors as u64 * sector_size;
                             return Ok((start_offset, size));
                         }
@@ -759,7 +777,10 @@ pub fn get_partition_geometry(drive_number: u32, partition_number: u32) -> FsRes
         }
     }
 
-    Err(FsError::NotFound(format!("Partition {} not found", partition_number)))
+    Err(FsError::NotFound(format!(
+        "Partition {} not found",
+        partition_number
+    )))
 }
 
 /// Identify partition type from GPT GUID

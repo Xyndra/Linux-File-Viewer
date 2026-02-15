@@ -2,8 +2,6 @@
 //!
 //! This module provides a unified interface for accessing both Windows and Linux filesystems.
 
-#![allow(dead_code)]
-
 use std::path::PathBuf;
 
 pub mod btrfs_fs;
@@ -28,9 +26,6 @@ pub enum FsError {
     #[error("Permission denied: {0}")]
     PermissionDenied(String),
 
-    #[error("Invalid path: {0}")]
-    InvalidPath(String),
-
     #[error("Filesystem error: {0}")]
     FilesystemError(String),
 
@@ -45,9 +40,6 @@ pub enum FsError {
 
     #[error("Unsupported filesystem: {0}")]
     UnsupportedFilesystem(String),
-
-    #[error("LUKS locked: {0}")]
-    LuksLocked(String),
 }
 
 pub type FsResult<T> = Result<T, FsError>;

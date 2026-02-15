@@ -1089,7 +1089,7 @@ impl FileExplorerApp {
                         continue;
                     }
                 };
-                self.cross_fs_copy(
+                Self::cross_fs_copy(
                     source_fs,
                     &src_entry.path,
                     src_entry.metadata.is_dir(),
@@ -1131,7 +1131,6 @@ impl FileExplorerApp {
     /// Copy a single entry (file or directory) across filesystems by reading
     /// from `src_fs` and writing to `dst_fs`.
     fn cross_fs_copy(
-        &self,
         src_fs: &MountedFs,
         src_path: &str,
         is_dir: bool,
@@ -1148,7 +1147,7 @@ impl FileExplorerApp {
                     std::path::MAIN_SEPARATOR,
                     child.metadata.name
                 );
-                self.cross_fs_copy(
+                Self::cross_fs_copy(
                     src_fs,
                     &child.path,
                     child.metadata.is_dir(),

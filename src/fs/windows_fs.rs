@@ -1,7 +1,4 @@
 //! Windows filesystem implementation using standard library
-
-#![allow(dead_code)]
-
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -60,11 +57,11 @@ impl WindowsFs {
             EntryType::Other
         };
 
-        let modified = metadata.modified().ok().map(|t| DateTime::<Utc>::from(t));
+        let modified = metadata.modified().ok().map(DateTime::<Utc>::from);
 
-        let created = metadata.created().ok().map(|t| DateTime::<Utc>::from(t));
+        let created = metadata.created().ok().map(DateTime::<Utc>::from);
 
-        let accessed = metadata.accessed().ok().map(|t| DateTime::<Utc>::from(t));
+        let accessed = metadata.accessed().ok().map(DateTime::<Utc>::from);
 
         // Check for hidden attribute on Windows
         #[cfg(windows)]
@@ -73,9 +70,6 @@ impl WindowsFs {
             const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
             (metadata.file_attributes() & FILE_ATTRIBUTE_HIDDEN) != 0
         };
-
-        #[cfg(not(windows))]
-        let hidden = name.starts_with('.');
 
         Ok(EntryMetadata {
             name,

@@ -205,7 +205,7 @@ impl<R: Read + Seek> BtrfsFs<R> {
         };
 
         let name = label
-            .or_else(|| {
+            .or({
                 if sb_label.is_empty() {
                     None
                 } else {

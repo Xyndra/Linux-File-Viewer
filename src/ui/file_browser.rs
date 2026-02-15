@@ -442,7 +442,7 @@ impl FileBrowser {
                         let is_renaming = self
                             .rename_state
                             .as_ref()
-                            .map_or(false, |r| r.original_index == original_idx);
+                            .is_some_and(|r| r.original_index == original_idx);
 
                         if is_renaming {
                             let mut rs = self.rename_state.take().unwrap();
@@ -614,12 +614,9 @@ impl FileBrowser {
                             }
 
                             // Cut (writable only)
-                            if is_writable {
-                                if ui.button("Cut         Ctrl+X").clicked() {
-                                    action =
-                                        Some(FileBrowserAction::CutEntries(vec![entry.clone()]));
-                                    ui.close_menu();
-                                }
+                            if is_writable && ui.button("Cut         Ctrl+X").clicked() {
+                                action = Some(FileBrowserAction::CutEntries(vec![entry.clone()]));
+                                ui.close_menu();
                             }
 
                             // Paste
@@ -685,14 +682,12 @@ impl FileBrowser {
                         action = Some(FileBrowserAction::PasteInto(self.current_path.clone()));
                         ui.close_menu();
                     }
-                    if is_writable {
-                        if ui.button("New folder   Ctrl+N").clicked() {
-                            self.new_folder_state = Some(NewFolderState {
-                                name: String::new(),
-                                focus_set: false,
-                            });
-                            ui.close_menu();
-                        }
+                    if is_writable && ui.button("New folder   Ctrl+N").clicked() {
+                        self.new_folder_state = Some(NewFolderState {
+                            name: String::new(),
+                            focus_set: false,
+                        });
+                        ui.close_menu();
                     }
                 },
             );

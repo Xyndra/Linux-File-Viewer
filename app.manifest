@@ -7,7 +7,7 @@
         type="win32"
     />
   <description
-    >Linux File Explorer - Access Windows and Linux filesystems</description>
+    >Linux File Explorer - Interact with Linux filesystems on Windows</description>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>

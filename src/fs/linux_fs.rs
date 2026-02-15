@@ -79,11 +79,11 @@ impl PartitionReader {
         let offset_in_start_sector = (absolute_offset % self.sector_size) as usize;
 
         let end_offset = absolute_offset + dst.len() as u64;
-        let end_sector = (end_offset + self.sector_size - 1) / self.sector_size;
+        let end_sector = end_offset.div_ceil(self.sector_size);
         let num_sectors = (end_sector - start_sector) as usize;
 
         // If the read is already sector-aligned and sector-sized, do direct read
-        if offset_in_start_sector == 0 && dst.len() % sector_size == 0 {
+        if offset_in_start_sector == 0 && dst.len().is_multiple_of(sector_size) {
             let aligned_offset = start_sector * self.sector_size;
             disk.seek(SeekFrom::Start(aligned_offset))?;
             return disk.read(dst);
@@ -381,10 +381,7 @@ impl LinuxFs {
         let ext4 = self.ext4.borrow();
         let normalized_path = if path.is_empty() { "/" } else { path };
 
-        match ext4.exists(normalized_path) {
-            Ok(exists) => exists,
-            Err(_) => false,
-        }
+        ext4.exists(normalized_path).unwrap_or_default()
     }
 
     /// Check if path is a directory

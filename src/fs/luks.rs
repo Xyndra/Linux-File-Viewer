@@ -3,8 +3,6 @@
 //! This module provides support for reading LUKS-encrypted partitions.
 //! Supports both LUKS1 and LUKS2 formats with AES-XTS and AES-CBC encryption.
 
-#![allow(dead_code)]
-
 use std::io::{Read, Seek, SeekFrom};
 
 use aes::cipher::KeyInit;
@@ -168,7 +166,7 @@ fn parse_string(data: &[u8]) -> String {
 /// Decode hex string to bytes
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
     let s = s.trim();
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     let mut bytes = Vec::with_capacity(s.len() / 2);
@@ -492,7 +490,7 @@ impl LuksHeader {
                             let next_bracket = slot_data.find('[');
 
                             if let Some(brace_pos) = next_brace {
-                                if next_bracket.map_or(true, |b| brace_pos < b) {
+                                if next_bracket.is_none_or(|b| brace_pos < b) {
                                     if let Some(slot) =
                                         Self::parse_keyslot_json(slot_data, slot_idx)
                                     {
@@ -606,7 +604,7 @@ impl LuksHeader {
                         .unwrap_or(4);
                     KdfType::Argon2i { time, memory, cpus }
                 }
-                "argon2id" | _ => {
+                "argon2id" => {
                     let time: u32 = extract_json_number(kdf_data, "time")
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(4);
@@ -617,6 +615,10 @@ impl LuksHeader {
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(4);
                     KdfType::Argon2id { time, memory, cpus }
+                }
+                _ => {
+                    // TODO: This is invisible because of admin privilige handling, use a msgbox instead
+                    panic!("Unsupported KDF type")
                 }
             }
         } else {
@@ -1025,8 +1027,6 @@ impl LuksReader {
                                 last_error =
                                     Some(format!("Slot {}: Verification error: {}", slot.index, e));
                             }
-                            #[cfg(not(debug_assertions))]
-                            let _ = e;
                         }
                     }
                 }
@@ -1035,8 +1035,6 @@ impl LuksReader {
                     {
                         last_error = Some(format!("Slot {}: {}", slot.index, e));
                     }
-                    #[cfg(not(debug_assertions))]
-                    let _ = e;
                 }
             }
         }
@@ -1087,7 +1085,7 @@ impl LuksReader {
                 slot.key_material_size as usize
             } else {
                 // Calculate from stripes, round up to sector boundary
-                let sectors = (af_size + 511) / 512;
+                let sectors = af_size.div_ceil(512);
                 sectors * 512
             };
         let key_material_offset = self.partition_offset + slot.key_material_offset;
@@ -1159,11 +1157,15 @@ impl LuksReader {
                             FsError::FilesystemError(format!("PBKDF2-SHA256 failed: {:?}", e))
                         })?;
                 }
-                "sha512" | _ => {
+                "sha512" => {
                     pbkdf2::<Hmac<Sha512>>(password, &slot.salt, *iterations, &mut derived_key)
                         .map_err(|e| {
                             FsError::FilesystemError(format!("PBKDF2-SHA512 failed: {:?}", e))
                         })?;
+                }
+                _ => {
+                    // TODO: Make this a msgbox
+                    panic!("Unsupported hash algorithm");
                 }
             },
             KdfType::Argon2i { time, memory, cpus } | KdfType::Argon2id { time, memory, cpus } => {
@@ -1206,7 +1208,7 @@ impl LuksReader {
         let total_size = slot.stripes as usize * master_key_len;
 
         // Round up to sector size
-        let sectors = (total_size + 511) / 512;
+        let sectors = total_size.div_ceil(512);
         let aligned_size = sectors * 512;
 
         // Determine encryption mode from slot or header
@@ -1459,7 +1461,7 @@ impl LuksReader {
         match hash_name.to_lowercase().as_str() {
             "sha512" => {
                 let hash_len = 64; // SHA-512 output size
-                let num_blocks = (data_len + hash_len - 1) / hash_len;
+                let num_blocks = data_len.div_ceil(hash_len);
 
                 for block_idx in 0..num_blocks {
                     let start = block_idx * hash_len;
@@ -1475,7 +1477,7 @@ impl LuksReader {
             }
             "sha256" => {
                 let hash_len = 32; // SHA-256 output size
-                let num_blocks = (data_len + hash_len - 1) / hash_len;
+                let num_blocks = data_len.div_ceil(hash_len);
 
                 for block_idx in 0..num_blocks {
                     let start = block_idx * hash_len;
@@ -1492,7 +1494,7 @@ impl LuksReader {
             _ => {
                 // Default to SHA-1 (LUKS1 compatibility)
                 let hash_len = 20; // SHA-1 output size
-                let num_blocks = (data_len + hash_len - 1) / hash_len;
+                let num_blocks = data_len.div_ceil(hash_len);
 
                 for block_idx in 0..num_blocks {
                     let start = block_idx * hash_len;
@@ -1710,7 +1712,7 @@ impl LuksReader {
         let start_sector = offset as usize / sector_size;
         let offset_in_sector = offset as usize % sector_size;
         let end_offset = offset as usize + buffer.len();
-        let end_sector = (end_offset + sector_size - 1) / sector_size;
+        let end_sector = end_offset.div_ceil(sector_size);
         let num_sectors = end_sector - start_sector;
 
         // Read aligned sectors
@@ -1799,7 +1801,7 @@ impl Read for DecryptedLuksReader {
         let bytes_read = self
             .inner
             .read_decrypted(self.position, buf)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
 
         self.position += bytes_read as u64;
         Ok(bytes_read)
