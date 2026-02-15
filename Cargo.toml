@@ -1,0 +1,47 @@
+[package]
+name = "linux_file_viewer"
+version = "0.1.0"
+edition = "2021"
+
+[build-dependencies]
+winresource = "0.1"
+
+[dependencies]
+# UI
+eframe = "0.31"
+egui = "0.31"
+egui_extras = { version = "0.31", features = ["image"] }
+
+# Filesystem
+ext4-view = { version = "0.9", features = ["std"] }
+
+# Windows raw disk access
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# Async & utilities
+thiserror = "2"
+chrono = "0.4"
+humansize = "2"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "ico"] }
+
+# LUKS decryption support
+aes = "0.8"
+xts-mode = "0.5"
+pbkdf2 = { version = "0.12", features = ["sha1"] }
+argon2 = "0.5"
+sha1 = "0.10"
+sha2 = "0.10"
+hmac = "0.12"
+cbc = "0.1"
+
+# btrfs support
+btrfs-diskformat = { version = "0.5", features = ["std"] }
